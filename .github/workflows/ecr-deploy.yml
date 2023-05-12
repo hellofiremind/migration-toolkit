@@ -1,0 +1,97 @@
+name: ecr-deploy
+
+on:
+  workflow_call:
+    secrets:
+      AWS_REGION:
+        required: true
+      ACTION_IAM_ROLE:
+        required: true
+
+jobs:
+  detect-folders:
+    runs-on: ubuntu-latest
+    outputs:
+      folders: ${{ steps.changed-folders.outputs.CHANGED_FOLDERS }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - id: set-matrix
+        run: echo "matrix=$(find backend/* -maxdepth 0 -type d | jq -R -s -c 'split("\n")[:-1]')" >> $GITHUB_OUTPUT
+
+      - name: List all changed files
+        run: |
+          for folder in ${{ steps.set-matrix.outputs.matrix }}; do
+            echo "$folder was detected"
+          done
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v35
+        with:
+          dir_names: true
+          json: "true"
+          files: "backend/**"
+          dir_names_max_depth: "2"
+
+      - name: Run step if any file(s) in the docs folder change
+        id: changed-folders
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          echo "One or more files in the docs folder has changed."
+          echo "List all the files that have changed: ${{ steps.changed-files.outputs.all_changed_files }}"
+          echo "CHANGED_FOLDERS=${{ steps.changed-files.outputs.all_changed_files }}" >> $GITHUB_OUTPUT
+
+  deploy-docker:
+    needs: detect-folders
+    runs-on: ubuntu-latest
+    environment: ${{ github.head_ref || github.ref_name }} 
+    env:
+      SERVICE: migration
+      BUILD_STAGE: ${{ github.head_ref || github.ref_name }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+    if: ${{ needs.detect-folders.outputs.folders != '[]' && needs.detect-folders.outputs.folders != '' }}
+    strategy:
+      matrix:
+        folders: ${{ fromJson(needs.detect-folders.outputs.folders) }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1-node16
+        with:
+          role-to-assume: ${{ secrets.ACTION_IAM_ROLE }}
+          role-session-name: GithubActionsDeployMigration
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Extract folder from path
+        id: find-folder
+        run: |
+          VAR=${{ matrix.folders }}
+          DIR=${VAR#*/}
+          echo "folder=$DIR" >> $GITHUB_OUTPUT
+      
+      - name: Print Folder
+        run: echo ${{ steps.find-folder.outputs.folder }}
+
+      - name: Log into Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Create ECR repo if missing
+        uses: byu-oit/github-action-create-ecr-repo-if-missing@v2
+        with:
+          DOCKER_REPO_NAME: ${{ env.SERVICE }}-${{ env.BUILD_STAGE }}-${{ steps.find-folder.outputs.folder }}
+
+      - name: Deploy Docker
+        run: |-
+          AWS_REGION=${{ env.AWS_REGION }} SERVICE_NAME=${{ matrix.folders }} BUILD_STAGE=${{ env.BUILD_STAGE }} TF_SERVICE=${{ env.SERVICE }} bash deployment-scripts/docker-deploy.sh
+
+      - name: ECS use latest image
+        run: |-
+          AWS_REGION=${{ env.AWS_REGION }} SERVICE_NAME=${{ steps.find-folder.outputs.folder }} BUILD_STAGE=${{ env.BUILD_STAGE }} TF_SERVICE=${{ env.SERVICE }} bash deployment-scripts/latest-image.sh

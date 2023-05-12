@@ -1,0 +1,138 @@
+name: 'Lint and deploy'
+
+on:
+  workflow_call:
+    inputs:
+      env_prefixes:
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      AWS_REGION:
+        required: true
+      ACTION_IAM_ROLE:
+        required: true
+jobs:
+  detect-folders:
+    runs-on: ubuntu-latest
+    outputs:
+      folders: ${{ steps.changed-folders.outputs.CHANGED_FOLDERS }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - id: set-matrix
+        run: echo "matrix=$(find frontend/* -maxdepth 0 -type d | jq -R -s -c 'split("\n")[:-1]')" >> $GITHUB_OUTPUT
+
+      - name: List all changed files
+        run: |
+          for folder in ${{ steps.set-matrix.outputs.matrix }}; do
+            echo "$folder was detected"
+          done
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v35
+        with:
+          dir_names: true
+          json: "true"
+          files: "frontend/**"
+          dir_names_max_depth: "2"
+
+      - name: Run step if any file(s) in the docs folder change
+        id: changed-folders
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          echo "One or more files in the docs folder has changed."
+          echo "List all the files that have changed: ${{ steps.changed-files.outputs.all_changed_files }}"
+          echo "CHANGED_FOLDERS=${{ steps.changed-files.outputs.all_changed_files }}" >> $GITHUB_OUTPUT
+
+  linting:
+    needs: detect-folders
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    if: ${{ needs.detect-folders.outputs.folders != '[]' && needs.detect-folders.outputs.folders != '' }}
+    strategy:
+      matrix:
+        folders: ${{ fromJson(needs.detect-folders.outputs.folders) }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Set up Node.js 16
+      uses: actions/setup-node@v3
+      with:
+        node-version: 16
+
+    - name: Install modules
+      run: npm install
+      working-directory: ${{ matrix.folders }}
+
+    - name: Test
+      run: npm test
+      env:
+          CI: true
+      working-directory: ${{ matrix.folders }}
+
+    - name: Lint with ESLint
+      run: |-
+          npm init @eslint/config
+          npx eslint
+      working-directory: ${{ matrix.folders }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [detect-folders, linting]
+    env:
+      BUILD_STAGE: ${{ github.base_ref }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+    permissions:
+      id-token: write
+      contents: read
+    if: ${{ needs.detect-folders.outputs.folders != '[]' && needs.detect-folders.outputs.folders != '' }}
+    strategy:
+      matrix:
+        folders: ${{ fromJson(needs.detect-folders.outputs.folders) }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Extract folder from path
+      id: find-folder
+      run: |
+        VAR=${{ matrix.folders }}
+        DIR=${VAR#*/}
+        echo "folder=$DIR" >> $GITHUB_OUTPUT
+
+    - name: Set up Node.js 16
+      uses: actions/setup-node@v3
+      with:
+        node-version: 16
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v1-node16
+      with:
+        role-to-assume: ${{ secrets.ACTION_IAM_ROLE }}
+        role-session-name: GithubActionsDeployMigration
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Install modules
+      run: npm install
+      working-directory: ${{ matrix.folders }}
+
+    - name: Deploy
+      run:  bash deployment-scripts/frontend-deploy.sh
+      env:
+        BUILD_STAGE: ${{ github.head_ref || github.ref_name }}
+        AWS_REGION: ${{ secrets.AWS_REGION }}
+        SERVICE: migration
+        DIRECTORY: ${{ matrix.folders }}
+        FRONTEND_NAME: ${{ steps.find-folder.outputs.folder }}

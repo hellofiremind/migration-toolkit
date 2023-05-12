@@ -1,0 +1,31 @@
+name: 'Main'
+
+on:
+  push:
+    branches: [foobar]
+  pull_request:
+    branches: [foobar]
+jobs:
+  ecr-deploy:
+    uses: ./.github/workflows/ecr-deploy.yml
+    secrets: inherit
+
+  plan:
+    needs: [ecr-deploy]
+    uses: ./.github/workflows/terraform-command.yml
+    with:
+      command: 'plan'
+    secrets: inherit
+
+  apply:
+    if: "${{ github.head_ref == '' }}"
+    needs: [plan]
+    uses: ./.github/workflows/terraform-command.yml
+    with:
+      command: 'apply -auto-approve'
+    secrets: inherit
+
+  frontend-deploy:
+    needs: [apply]
+    uses: ./.github/workflows/frontend-deploy.yml
+    secrets: inherit

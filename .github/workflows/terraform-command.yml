@@ -1,0 +1,83 @@
+name: terraform-command-workflow
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        required: true
+        type: string
+      env_prefixes:
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      AWS_REGION:
+        required: true
+      S3_TERRAFORM_STATE_REGION:
+        required: true 
+      S3_TERRAFORM_STATE_BUCKET:
+        required: true
+      ACTION_IAM_ROLE:
+        required: true
+  
+jobs:
+  run_tf_command:
+    runs-on: ubuntu-latest
+
+    env:
+      TF_VAR_SERVICE: migration
+      TF_VAR_BUILD_STAGE: ${{ github.head_ref || github.ref_name }}
+      TF_VAR_AWS_REGION: ${{ secrets.AWS_REGION }}
+      TF_VAR_STATE_BUCKET: ${{ secrets.S3_TERRAFORM_STATE_BUCKET }}
+      TF_VAR_CONFIG_FILE_LOCATION: config/config.${{ github.head_ref || github.ref_name }}.json
+      S3_TERRAFORM_STATE_KEY: "${{ secrets.AWS_REGION }}/migration/${{ github.head_ref || github.ref_name }}"
+      S3_TERRAFORM_STATE_REGION: ${{ secrets.S3_TERRAFORM_STATE_REGION }}
+      TF_VAR_DOMAIN_BASE: "example.example.com"
+      TF_VAR_DNS_ZONE: "example.example.com"
+
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1-node16
+        with:
+          role-to-assume: ${{ secrets.ACTION_IAM_ROLE }}
+          role-session-name: GithubActionsDeployMigration
+          aws-region: ${{ env.TF_VAR_AWS_REGION }}
+
+      - name: Set enviroment variables
+        if: "${{ github.head_ref != '' }}"
+        run: |
+          ENVIROMENTS=("development" "staging" "production")
+          # Checks if the branch being merged in is in the enviroments array
+          if ! [[ " ${ENVIROMENTS[*]} " =~ ${{ github.head_ref }} ]]; then
+            echo "TF_VAR_BUILD_STAGE=${{ github.base_ref }}" >> $GITHUB_ENV
+            echo "TF_VAR_CONFIG_FILE_LOCATION=config/config.${{ github.base_ref }}.json" >> $GITHUB_ENV
+            echo "S3_TERRAFORM_STATE_KEY=${{ secrets.AWS_REGION }}/${{ github.event.repository.name }}/${{ github.base_ref }}" >> $GITHUB_ENV
+          fi
+
+      - name: tfsec
+        if: ${{ inputs.command == 'plan' }}
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          soft_fail: true
+
+      - name: Downcase key
+        run: |
+          echo "S3_TERRAFORM_STATE_KEY=${S3_TERRAFORM_STATE_KEY,,}" >>${GITHUB_ENV}
+      - name: Creating state bucket
+        run: S3_TERRAFORM_STATE_BUCKET=${{ secrets.S3_TERRAFORM_STATE_BUCKET }} S3_TERRAFORM_STATE_REGION=${{ secrets.S3_TERRAFORM_STATE_REGION }} bash deployment-scripts/create-bucket.sh
+
+      - name: Terraform Init
+        id: init
+        run: terraform init -backend-config="bucket=$TF_VAR_STATE_BUCKET" -backend-config="key=$S3_TERRAFORM_STATE_KEY" -backend-config="region=$S3_TERRAFORM_STATE_REGION"
+
+      - name: Terraform Command
+        id: command
+        run: ${{ inputs.env_prefixes }} terraform ${{ inputs.command }}
