@@ -22,6 +22,8 @@
 
 **TL;DR**: This framework allows you to get started with a <b>Migration landing zone</b> on AWS using native services.
 
+Firemind’s SaaS Migration Toolkit, allows customers to get started with a Migration landing zone on AWS using native services. It’s all built using IaC and CICD. It allows customers to deploy multiple containerised workloads on to ECS, hold state in Aurora/ElastiCache/etc and deploy a frontend on S3.
+
 #### Migration Toolkit is part of [Firemind's Modern Data Strategy](https://www.firemind.com/modern-data-strategy/) tools
 
 [![Firemind's Modern Data Strategy](wheel.png)](https://www.firemind.com/modern-data-strategy/)
